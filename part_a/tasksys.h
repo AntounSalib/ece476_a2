@@ -51,6 +51,14 @@ class TaskSystemParallelThreadPoolSpinning: public ITaskSystem {
         TaskID runAsyncWithDeps(IRunnable* runnable, int num_total_tasks,
                                 const std::vector<TaskID>& deps);
         void sync();
+    private:
+        std::vector<std::thread> workers_;
+        IRunnable* runnable_;
+        int num_total_tasks_;
+        int num_threads_;
+        std::atomic<int> next_task_;
+        std::atomic<int> tasks_completed;
+        std::atomic<bool> stop_;
 };
 
 /*
