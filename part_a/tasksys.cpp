@@ -1,3 +1,5 @@
+#include <thread>
+#include <mutex>
 #include "tasksys.h"
 
 
@@ -48,7 +50,9 @@ const char* TaskSystemParallelSpawn::name() {
     return "Parallel + Always Spawn";
 }
 
-TaskSystemParallelSpawn::TaskSystemParallelSpawn(int num_threads): ITaskSystem(num_threads) {
+TaskSystemParallelSpawn::TaskSystemParallelSpawn(int num_threads): 
+    ITaskSystem(num_threads),
+    num_threads_(num_threads) {
     //
     // TODO: ECE476 student implementations may decide to perform setup
     // operations (such as thread pool construction) here.
@@ -81,16 +85,16 @@ void TaskSystemParallelSpawn::run(IRunnable* runnable, int num_total_tasks) {
     // tasks sequentially on the calling thread.
     //
 
-    std::thread threads[num_threads];
+    std::thread threads[num_threads_];
     std::mutex mtx;
     int next_task = 0;
 
-    for (int i = 0; i < num_threads; i++){
+    for (int i = 0; i < num_threads_; i++){
         threads[i] = std::thread(&TaskSystemParallelSpawn::worker, this,runnable, num_total_tasks, &next_task, &mtx);
     }
 
     // wait for all threads to finish
-    for (int i = 0; i < num_threads; i++){
+    for (int i = 0; i < num_threads_; i++){
         threads[i].join();
     }
 }
@@ -117,40 +121,53 @@ const char* TaskSystemParallelThreadPoolSpinning::name() {
 }
 
 TaskSystemParallelThreadPoolSpinning::TaskSystemParallelThreadPoolSpinning(int num_threads): ITaskSystem(num_threads), 
-num_threads_(num_threads),
 runnable_(nullptr),
 num_total_tasks_(0),
 tasks_completed_(0),
 next_task_(0),
-stop_(false) {
+num_working_(0),
+stop_(false), 
+worker_locks_(num_threads){
     //
     // TODO: ECE476 student implementations may decide to perform setup
     // operations (such as thread pool construction) here.
     // Implementations are free to add new class member variables
     // (requiring changes to tasksys.h).
     //
+    num_threads_ = num_threads;
+
+    for (int i = 0; i < num_threads; i++)
+        worker_locks_[i].lock();
+
     for (int i = 0; i < num_threads; i++){
-        workers_.emplace_back(std::thread(&TaskSystemParallelThreadPoolSpinning::worker, this));
+        workers_.emplace_back(std::thread(&TaskSystemParallelThreadPoolSpinning::worker, this, i));
     }
 }
 
-void TaskSystemParallelThreadPoolSpinning::~TaskSystemParallelThreadPoolSpinning() {
+TaskSystemParallelThreadPoolSpinning::~TaskSystemParallelThreadPoolSpinning() {
     stop_.store(true);
+    for (int i = 0; i < num_threads_; i++)
+        worker_locks_[i].unlock();
+
     for(int i = 0; i < num_threads_; i++){
         workers_[i].join();
     }
+    return;
 }
 
-void TaskSystemParallelThreadPoolSpinning::worker(){
-   while (!stop_) {
-        int task = next_task_.fetch_add(1);
-        if (task < num_total_tasks_) {
-            runnable_->runTask(task, num_total_tasks_);
+void TaskSystemParallelThreadPoolSpinning::worker(int id){
+   while (true) {
+        worker_locks_[id].lock();                 
+        if (stop_.load()) { worker_locks_[id].unlock(); return; }
+
+        while (true) {
+            int task = next_task_.fetch_add(1);
+            if (task >= num_total_tasks_) break;
+            runnable_.load()->runTask(task, num_total_tasks_.load());
             tasks_completed_.fetch_add(1);
         }
-        else{
-            next_task_.fetch_sub(1); // decrement next_task back to prevent unbounded growth
-        }
+
+        worker_locks_[id].unlock();    
     }
 }
 
@@ -160,11 +177,19 @@ void TaskSystemParallelThreadPoolSpinning::run(IRunnable* runnable, int num_tota
     // method in Part A.  The implementation provided below runs all
     // tasks sequentially on the calling thread.
     //
+    
     runnable_ = runnable;
+    next_task_ = 0;
     tasks_completed_ = 0;
     num_total_tasks_ = num_total_tasks;
-    next_task_ = 0;  // releasing tasks to workers
-    while (tasks_completed_ < num_total_tasks) {}  // spin until all complete
+
+    for (int i = 0; i < num_threads_; i++)
+        worker_locks_[i].unlock();               
+
+    while (tasks_completed_.load() < num_total_tasks) {}
+
+    for (int i = 0; i < num_threads_; i++)
+        worker_locks_[i].lock();        
 
     return;
 }
@@ -216,7 +241,6 @@ void TaskSystemParallelThreadPoolSleeping::run(IRunnable* runnable, int num_tota
     // method in Parts A and B.  The implementation provided below runs all
     // tasks sequentially on the calling thread.
     //
-
     for (int i = 0; i < num_total_tasks; i++) {
         runnable->runTask(i, num_total_tasks);
     }
