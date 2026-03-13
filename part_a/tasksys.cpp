@@ -123,9 +123,7 @@ const char* TaskSystemParallelThreadPoolSpinning::name() {
 TaskSystemParallelThreadPoolSpinning::TaskSystemParallelThreadPoolSpinning(int num_threads): ITaskSystem(num_threads), 
 runnable_(nullptr),
 num_total_tasks_(0),
-tasks_completed_(0),
 next_task_(0),
-num_working_(0),
 stop_(false), 
 worker_locks_(num_threads){
     //
@@ -157,16 +155,26 @@ TaskSystemParallelThreadPoolSpinning::~TaskSystemParallelThreadPoolSpinning() {
 
 void TaskSystemParallelThreadPoolSpinning::worker(int id){
    while (true) {
-        worker_locks_[id].lock();                 
-        if (stop_.load()) { worker_locks_[id].unlock(); return; }
+        // worker can only grab its lock if released by run
+        worker_locks_[id].lock();  
 
-        while (true) {
-            int task = next_task_.fetch_add(1);
-            if (task >= num_total_tasks_) break;
-            runnable_.load()->runTask(task, num_total_tasks_.load());
-            tasks_completed_.fetch_add(1);
+        // if stop, then give lock back and return
+        if (stop_.load()) { 
+            worker_locks_[id].unlock(); 
+            return; 
         }
 
+        // once started, worker does next available task until all 
+        // tasks completed
+        while (true) {
+            int task = next_task_.fetch_add(1);
+            if (task >= num_total_tasks_) {
+                break;
+            }
+            runnable_->runTask(task, num_total_tasks_.load());
+        }
+
+        // once done, worker gives back their lock
         worker_locks_[id].unlock();    
     }
 }
@@ -185,8 +193,6 @@ void TaskSystemParallelThreadPoolSpinning::run(IRunnable* runnable, int num_tota
 
     for (int i = 0; i < num_threads_; i++)
         worker_locks_[i].unlock();               
-
-    while (tasks_completed_.load() < num_total_tasks) {}
 
     for (int i = 0; i < num_threads_; i++)
         worker_locks_[i].lock();        
