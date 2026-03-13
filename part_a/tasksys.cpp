@@ -124,8 +124,8 @@ TaskSystemParallelThreadPoolSpinning::TaskSystemParallelThreadPoolSpinning(int n
 runnable_(nullptr),
 num_total_tasks_(0),
 next_task_(0),
-stop_(false), 
-worker_locks_(num_threads){
+tasks_completed_(0),
+stop_(false){
     //
     // TODO: ECE476 student implementations may decide to perform setup
     // operations (such as thread pool construction) here.
@@ -133,49 +133,39 @@ worker_locks_(num_threads){
     // (requiring changes to tasksys.h).
     //
     num_threads_ = num_threads;
-
-    for (int i = 0; i < num_threads; i++)
-        worker_locks_[i].lock();
+    mtx_.lock();
 
     for (int i = 0; i < num_threads; i++){
-        workers_.emplace_back(std::thread(&TaskSystemParallelThreadPoolSpinning::worker, this, i));
+        workers_.emplace_back(std::thread(&TaskSystemParallelThreadPoolSpinning::worker, this));
     }
 }
 
 TaskSystemParallelThreadPoolSpinning::~TaskSystemParallelThreadPoolSpinning() {
     stop_.store(true);
-    for (int i = 0; i < num_threads_; i++)
-        worker_locks_[i].unlock();
-
+    mtx_.unlock();
     for(int i = 0; i < num_threads_; i++){
         workers_[i].join();
     }
     return;
 }
 
-void TaskSystemParallelThreadPoolSpinning::worker(int id){
-   while (true) {
-        // worker can only grab its lock if released by run
-        worker_locks_[id].lock();  
-
-        // if stop, then give lock back and return
-        if (stop_.load()) { 
-            worker_locks_[id].unlock(); 
-            return; 
+void TaskSystemParallelThreadPoolSpinning::worker(){
+   while (!stop_) {
+        // worker can only grab its lock if released by run or destructor
+        mtx_.lock();  
+        // if done with tasks, spin
+        if (next_task_ >= num_total_tasks_){
+            mtx_.unlock();
+            continue;
         }
+        // grab next task, then release lock
+        int task = next_task_;
+        next_task_++;
+        mtx_.unlock();
 
-        // once started, worker does next available task until all 
-        // tasks completed
-        while (true) {
-            int task = next_task_.fetch_add(1);
-            if (task >= num_total_tasks_) {
-                break;
-            }
-            runnable_->runTask(task, num_total_tasks_.load());
-        }
-
-        // once done, worker gives back their lock
-        worker_locks_[id].unlock();    
+        // run task
+        runnable_->runTask(task, num_total_tasks_);
+        tasks_completed_.fetch_add(1);
     }
 }
 
@@ -185,19 +175,16 @@ void TaskSystemParallelThreadPoolSpinning::run(IRunnable* runnable, int num_tota
     // method in Part A.  The implementation provided below runs all
     // tasks sequentially on the calling thread.
     //
-    
+
     runnable_ = runnable;
     next_task_ = 0;
     tasks_completed_ = 0;
     num_total_tasks_ = num_total_tasks;
+    mtx_.unlock();
 
-    for (int i = 0; i < num_threads_; i++)
-        worker_locks_[i].unlock();               
-
-    for (int i = 0; i < num_threads_; i++)
-        worker_locks_[i].lock();        
-
-    return;
+    while (tasks_completed_.load() < num_total_tasks) {};
+    
+    mtx_.lock();
 }
 
 TaskID TaskSystemParallelThreadPoolSpinning::runAsyncWithDeps(IRunnable* runnable, int num_total_tasks,
