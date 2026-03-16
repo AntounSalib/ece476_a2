@@ -8,6 +8,7 @@
 #include <condition_variable>
 #include <unordered_set>
 #include <list>
+#include <memory>
 
 /*
  * TaskSystemSerial: This class is the student's implementation of a
@@ -78,17 +79,17 @@ class TaskSystemParallelThreadPoolSleeping: public ITaskSystem {
             struct LaunchInfo {
                 TaskID id;
                 IRunnable* runnable;
-                int next_task;
+                std::atomic<int> next_task;
                 int num_total_tasks;
-                int num_tasks_completed;
+                std::atomic<int> num_tasks_completed;
                 std::vector<TaskID> deps;
             };
 
             // dependency variables
             std::atomic<TaskID> next_unique_launch_index_;
             std::unordered_set<TaskID> completed_TaskIDs_;
-            std::list<LaunchInfo> ready_tasks_;
-            std::list<LaunchInfo> waiting_tasks_;
+            std::list<std::shared_ptr<LaunchInfo>> ready_tasks_;
+            std::list<std::shared_ptr<LaunchInfo>> waiting_tasks_;
 
             // worker variables
             void worker();

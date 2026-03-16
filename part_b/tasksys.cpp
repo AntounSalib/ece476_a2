@@ -1,6 +1,7 @@
 #include <thread>
 #include <mutex>
 #include <condition_variable>
+#include <memory>
 #include "tasksys.h"
 
 
@@ -196,12 +197,20 @@ TaskID TaskSystemParallelThreadPoolSleeping::runAsyncWithDeps(IRunnable* runnabl
 
     // add new launch info to appropriate list
     TaskID new_id = next_unique_launch_index_;
+    auto info = std::make_shared<LaunchInfo>();
+    info->id = new_id;
+    info->runnable = runnable;
+    info->next_task = 0;
+    info->num_total_tasks = num_total_tasks;
+    info->num_tasks_completed = 0;
+    info->deps = deps;
     next_unique_launch_index_++;
+
     if(ready){
-        ready_tasks_.emplace_back(LaunchInfo{new_id, runnable, 0, num_total_tasks, 0, deps});
+        ready_tasks_.push_back(std::move(info));
     }
     else{
-        waiting_tasks_.emplace_back(LaunchInfo{new_id, runnable, 0, num_total_tasks, 0, deps});
+        waiting_tasks_.push_back(std::move(info));
     }
     mtx_.unlock();
 
@@ -219,7 +228,7 @@ void TaskSystemParallelThreadPoolSleeping::worker(){
         cv_work_.wait(lock, [this]{ 
             if (stop_) return true;
             for (auto& l : ready_tasks_) {
-                if (l.next_task < l.num_total_tasks) return true;
+                if (l->next_task < l->num_total_tasks) return true;
             }
             return false;
          });
@@ -234,70 +243,61 @@ void TaskSystemParallelThreadPoolSleeping::worker(){
                 break;
             }
             // grab next ready launch, then release lock
-            LaunchInfo* found = nullptr;
+            std::shared_ptr<LaunchInfo> target;
             for (auto& l : ready_tasks_) {
-                if (l.next_task < l.num_total_tasks) {
-                    found = &l;
+                if (l->next_task < l->num_total_tasks) {
+                    target = l;  // bumps refcount
                     break;
                 }
             }
-            if (!found) {
-                break;
-            }
-            LaunchInfo& launch_info = *found;
-            int task = launch_info.next_task++;
+            if (!target) break;
+
+            // LaunchInfo& launch_info = *target;
+            // int task = launch_info.next_task++;
 
             lock.unlock();
 
-            // run task
-            launch_info.runnable->runTask(task, launch_info.num_total_tasks);
-                        
-            // last thread to complete a task in a given launch, finds
-            // the next launch
-            lock.lock();
-            if (++launch_info.num_tasks_completed == launch_info.num_total_tasks){
-                completed_TaskIDs_.insert(launch_info.id);
-                for (auto it = ready_tasks_.begin(); it != ready_tasks_.end(); ++it) {
-                    if (&(*it) == &launch_info) {
-                        ready_tasks_.erase(it);
-                        break;
-                    }
-                }
-                
-                if (ready_tasks_.empty() && waiting_tasks_.empty()){
-                    cv_done_.notify_one();
-                }
+            while (true) {
+                int task = target->next_task.fetch_add(1, std::memory_order_relaxed);
+                if (task >= target->num_total_tasks) break;
 
-                // whether any task has become ready
-                bool newly_ready_task = false;
+                target->runnable->runTask(task, target->num_total_tasks);
 
-                // update runnable tasks list
-                for (auto curr_info = waiting_tasks_.begin(); curr_info != waiting_tasks_.end();){
-                    bool ready = true;
-                    for (TaskID id : curr_info->deps){
-                        if(!completed_TaskIDs_.count(id)){
-                            ready = false;
+                if (target->num_tasks_completed.fetch_add(1, std::memory_order_acq_rel) + 1
+                    == target->num_total_tasks) {
+                   
+                    lock.lock();
+                    completed_TaskIDs_.insert(target->id);
+                    for (auto it = ready_tasks_.begin(); it != ready_tasks_.end(); ++it) {
+                        if (*it == target) {
+                            ready_tasks_.erase(it);
                             break;
                         }
                     }
 
-                    // if ready, add to list and update 
-                    // newly_ready_task boolean
-                    if(ready){
-                        newly_ready_task = true;
-                        ready_tasks_.push_back(std::move(*curr_info));
-                        curr_info = waiting_tasks_.erase(curr_info);
-                    } else{
-                        curr_info++;
+                    if (ready_tasks_.empty() && waiting_tasks_.empty()) {
+                        cv_done_.notify_one();
                     }
-                }
 
-                // if new task is available, wakes up potentially
-                // asleep workers
-                if (newly_ready_task){
-                    cv_work_.notify_all();
+                    bool newly_ready = false;
+                    for (auto it = waiting_tasks_.begin(); it != waiting_tasks_.end();) {
+                        bool rdy = true;
+                        for (TaskID id : (*it)->deps) {
+                            if (!completed_TaskIDs_.count(id)) { rdy = false; break; }
+                        }
+                        if (rdy) {
+                            newly_ready = true;
+                            ready_tasks_.push_back(std::move(*it));
+                            it = waiting_tasks_.erase(it);
+                        } else { ++it; }
+                    }
+                    if (newly_ready) cv_work_.notify_all();
+                    lock.unlock();
+                    break; 
                 }
             }
+            
+            lock.lock();
         }
         
     }
