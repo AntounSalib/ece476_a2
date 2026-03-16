@@ -211,11 +211,18 @@ TaskID TaskSystemParallelThreadPoolSleeping::runAsyncWithDeps(IRunnable* runnabl
 }
 
 void TaskSystemParallelThreadPoolSleeping::worker(){
-   while (true) {
+    std::unique_lock<std::mutex> lock(mtx_);
+
+    while (true) {
         // wait to be woken up
         // Once woken, checks if next_task is ready or time to stop
-        std::unique_lock<std::mutex> lock(mtx_);
-        cv_work_.wait(lock, [this]{ return (ready_tasks_.size()>0) || stop_; });
+        cv_work_.wait(lock, [this]{ 
+            if (stop_) return true;
+            for (auto& l : ready_tasks_) {
+                if (l.next_task < l.num_total_tasks) return true;
+            }
+            return false;
+         });
 
         // if stop, end
         if(stop_) return;
@@ -224,19 +231,22 @@ void TaskSystemParallelThreadPoolSleeping::worker(){
         while(true){
             // if done with tasks, break loop
             if (ready_tasks_.empty()){
-                lock.unlock();
                 break;
             }
             // grab next ready launch, then release lock
-            LaunchInfo& launch_info = ready_tasks_[0];
-            int task = launch_info.next_task;
-            if (task >= launch_info.num_total_tasks){
-                lock.unlock();
-                lock.lock();
-                continue;
+            LaunchInfo* found = nullptr;
+            for (auto& l : ready_tasks_) {
+                if (l.next_task < l.num_total_tasks) {
+                    found = &l;
+                    break;
+                }
             }
+            if (!found) {
+                break;
+            }
+            LaunchInfo& launch_info = *found;
+            int task = launch_info.next_task++;
 
-            launch_info.next_task++;
             lock.unlock();
 
             // run task
@@ -247,7 +257,12 @@ void TaskSystemParallelThreadPoolSleeping::worker(){
             lock.lock();
             if (++launch_info.num_tasks_completed == launch_info.num_total_tasks){
                 completed_TaskIDs_.insert(launch_info.id);
-                ready_tasks_.erase(ready_tasks_.begin());
+                for (auto it = ready_tasks_.begin(); it != ready_tasks_.end(); ++it) {
+                    if (&(*it) == &launch_info) {
+                        ready_tasks_.erase(it);
+                        break;
+                    }
+                }
                 
                 if (ready_tasks_.empty() && waiting_tasks_.empty()){
                     cv_done_.notify_one();
@@ -272,9 +287,9 @@ void TaskSystemParallelThreadPoolSleeping::worker(){
                         newly_ready_task = true;
                         ready_tasks_.push_back(std::move(*curr_info));
                         curr_info = waiting_tasks_.erase(curr_info);
-                        
+                    } else{
+                        curr_info++;
                     }
-
                 }
 
                 // if new task is available, wakes up potentially

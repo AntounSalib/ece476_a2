@@ -7,6 +7,7 @@
 #include <thread>
 #include <condition_variable>
 #include <unordered_set>
+#include <list>
 
 /*
  * TaskSystemSerial: This class is the student's implementation of a
@@ -86,8 +87,8 @@ class TaskSystemParallelThreadPoolSleeping: public ITaskSystem {
             // dependency variables
             std::atomic<TaskID> next_unique_launch_index_;
             std::unordered_set<TaskID> completed_TaskIDs_;
-            std::vector<LaunchInfo> ready_tasks_;
-            std::vector<LaunchInfo> waiting_tasks_;
+            std::list<LaunchInfo> ready_tasks_;
+            std::list<LaunchInfo> waiting_tasks_;
 
             // worker variables
             void worker();
