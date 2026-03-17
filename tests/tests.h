@@ -58,24 +58,52 @@ typedef struct {
  * ==================================================================
 */
 /*
- * Implement your task here
+ * my test
+ * want to experiment with a large number of launches with only 1 task per launch
+ * test how our implementation handles a scenario where launch overhead is the bottleneck
+
+ * my task is very similar to LightTask
 */
 class YourTask : public IRunnable {
     public:
-        YourTask() {}
+        int *output_;
+        YourTask(int *output) : output_(output) {}
         ~YourTask() {}
-        void runTask(int task_id, int num_total_tasks) {}
+
+        void runTask(int task_id, int num_total_tasks) {
+            output_[task_id] = task_id;
+        }
 };
 /*
  * Implement your test here. Call this function from a wrapper that passes in
  * do_async and num_elements. See `simpleTest`, `simpleTestSync`, and
  * `simpleTestAsync` as an example.
  */
-TestResults yourTest(ITaskSystem* t, bool do_async, int num_elements, int num_bulk_task_launches) {
+TestResults yourTest(ITaskSystem* t, bool do_async) {
+
+    // TODO: instantiate your bulk task launches
+    int num_elements_per_task = 1;
+    int num_tasks = 2;
+    int num_bulk_task_launches = 1000;
+    int num_elements = num_elements_per_task * num_tasks * num_bulk_task_launches;
+
     // TODO: initialize your input and output buffers
     int* output = new int[num_elements];
 
-    // TODO: instantiate your bulk task launches
+    // default value for each array element = -1
+    for (int i=0; i<num_elements; i++) {
+        output[i] = -1;
+    }
+
+    // make pointers to the launches
+    std::vector<YourTask*> launches;
+    launches.reserve(num_bulk_task_launches);
+
+    // assign the two tasks for each launch its own portion of the output array
+    // output[0] and output[1] for the first launch, output[2] and output[3] for the second launch, etc
+    for (int i = 0; i < num_bulk_task_launches; i++) {
+        launches.push_back(new YourTask(output + (i * 2)));
+    }
 
     // Run the test
     double start_time = CycleTimer::currentSeconds();
@@ -84,8 +112,24 @@ TestResults yourTest(ITaskSystem* t, bool do_async, int num_elements, int num_bu
         // initialize dependency vector
         // make calls to t->runAsyncWithDeps and push TaskID to dependency vector
         // t->sync() at end
+
+        // each launch depends on the prev launch
+        std::vector<TaskID> noDeps;
+        // run first launch w no dependencies
+        TaskID old_task_id = t->runAsyncWithDeps(launches[0], num_tasks, noDeps);
+        // run each launch and update old_task_id
+        for (int i = 1; i < num_bulk_task_launches; i++) {
+            std::vector<TaskID> deps;
+            deps.push_back(old_task_id);
+            old_task_id = t->runAsyncWithDeps(launches[i], num_tasks, deps);
+        }
+        t->sync();
     } else {
         // TODO: make calls to t->run
+        // run each launch sequentially
+        for (int i = 0; i < num_bulk_task_launches; i++) {
+            t->run(launches[i], num_tasks);
+        }
     }
     double end_time = CycleTimer::currentSeconds();
 
@@ -93,16 +137,21 @@ TestResults yourTest(ITaskSystem* t, bool do_async, int num_elements, int num_bu
     TestResults results;
     results.passed = true;
 
+    // we expect values to be:
+    // odd-numbered array values should be 1
+    // even-numbered array values should be 0
     for (int i=0; i<num_elements; i++) {
-        int value = 0; // TODO: initialize value
-        for (int j=0; j<num_bulk_task_launches; j++) {
-            // TODO: update value as expected
+        int expected;
+        if (i % 2 == 0) {
+            expected = 0;
+        }
+        else {
+            expected = 1;
         }
 
-        int expected = value;
         if (output[i] != expected) {
             results.passed = false;
-            printf("%d: %d expected=%d\n", i, output[i], expected);
+            printf("output[%d] = %d expected=%d\n", i, output[i], expected);
             break;
         }
     }
@@ -110,8 +159,22 @@ TestResults yourTest(ITaskSystem* t, bool do_async, int num_elements, int num_bu
 
     delete [] output;
 
+    // also need to delete launch pointers
+    for (int i = 0; i < num_bulk_task_launches; i++) {
+        delete launches[i];
+    }
+
     return results;
 }
+
+TestResults yourTestSync(ITaskSystem* t) {
+    return yourTest(t, false);
+}
+
+TestResults yourTestAsync(ITaskSystem* t) {
+    return yourTest(t, true);
+}
+
 
 /*
  * ==================================================================
